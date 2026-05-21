@@ -10,7 +10,11 @@ Claude enforces two rolling usage caps shared across the CLI and web UI:
 - **5-hour window** — short-term rate limit
 - **7-day window** — weekly cap
 
-claude-watcher polls a private Anthropic endpoint every few minutes. When it detects utilization drop from high → below 5%, it fires a Slack notification exactly once. Your Slack mobile app will receive it like any other message — no need to keep Slack web open.
+claude-watcher polls a private Anthropic endpoint every few minutes. It detects a reset in two ways — whichever fires first:
+1. The `resets_at` timestamp changes (Anthropic issued a new window)
+2. Utilization drops from above 5% down to below 5%
+
+When a reset is detected it fires a Slack notification exactly once. Your Slack mobile app will receive it like any other message — no need to keep Slack web open.
 
 **What you see in the terminal while it runs:**
 ```
@@ -95,7 +99,9 @@ claude-watcher status
 | `claude-watcher start --logs` | Start in terminal with live log output |
 | `claude-watcher stop` | Stop the background process |
 | `claude-watcher logs` | Tail the log file live (Ctrl+C to exit) |
-| `claude-watcher status` | One-shot usage snapshot |
+| `claude-watcher status` | One-shot usage snapshot — current utilization and reset times |
+| `claude-watcher test-notify` | Send a test message to Slack — use this to verify your webhook works |
+| `claude-watcher init` | Re-run setup to update credentials or settings |
 
 ### Auto-start on login (Windows)
 
@@ -174,7 +180,7 @@ A **WhatsApp stub** is already in `src/notifier.ts`. To activate it: uncomment `
 |---|---|
 | `Auth rejected (HTTP 401)` | Session key expired — grab a fresh cookie and re-run `init` |
 | `Config not found` | Run `claude-watcher init` first |
-| Slack never fires | The trigger arms only after usage climbs above 5% and then drops. If you start the tool right after a reset, wait for the next session cycle. |
+| Slack never fires | Run `claude-watcher test-notify` to verify your webhook works. If that succeeds but resets still don't notify, check the logs with `claude-watcher logs` to confirm the monitor is running and polling. |
 | `node: command not found` | Node.js isn't installed or not on PATH — [download here](https://nodejs.org) |
 
 ---
