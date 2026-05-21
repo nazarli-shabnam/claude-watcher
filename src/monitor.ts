@@ -1,12 +1,13 @@
 import type { Notifier, UsageResponse, WatcherConfig, WindowKey } from "./types";
 import { fetchUsage } from "./claudeClient";
 
-const RESET_THRESHOLD_PCT = 5;
+// A real reset pushes resets_at forward by 5 hours (5h window) or 7 days (7d window).
+// We use 1 hour as the minimum threshold to ignore minor API timestamp fluctuations
+// while still catching every legitimate reset.
+const RESET_WINDOW_MIN_MS = 60 * 60 * 1000;
 
 interface WindowState {
-  lastUtilization: number;
-  lastResetsAt: string;   // ISO — when this changes, a new window has definitively started
-  resetFired: boolean;
+  lastResetsAt: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -34,52 +35,36 @@ async function checkOnce(
   ];
 
   for (const { key, data, label } of windows) {
-    const prev: WindowState = state.get(key) ?? {
-      lastUtilization: data.utilization,
-      lastResetsAt: data.resets_at,
-      resetFired: false,
-    };
+    const prev = state.get(key);
 
-    const current = data.utilization;
-
-    // Primary signal: resets_at moved forward by more than 1 hour → Anthropic issued a new window.
-    // We compare numeric timestamps rather than strings to avoid false positives from minor
-    // API fluctuations (e.g. millisecond differences in the returned ISO string).
-    const prevResetMs = prev.lastResetsAt ? new Date(prev.lastResetsAt).getTime() : 0;
-    const currResetMs = new Date(data.resets_at).getTime();
-    const windowRolled = prevResetMs > 0 && (currResetMs - prevResetMs) > 60 * 60 * 1000;
-
-    // Secondary signal: utilization dropped sharply (catches edge cases where timestamp
-    // doesn't change but usage is clearly reset)
-    const utilizationDropped =
-      prev.lastUtilization >= RESET_THRESHOLD_PCT && current < RESET_THRESHOLD_PCT;
-
-    const shouldFire = (windowRolled || utilizationDropped) && !prev.resetFired;
-
-    if (shouldFire) {
-      const reason = windowRolled ? "new window issued" : "utilization dropped";
-      console.log(`[${ts()}] RESET DETECTED — ${label} (${reason}). Sending notification.`);
-
-      const message =
-        `*${label} has reset!* Your Claude usage window just refreshed — you\'re back at full capacity.\n` +
-        `Next reset scheduled for: ${humanDate(data.resets_at)}`;
-
-      await notifier.notify(message, {
-        window: key,
-        utilization_before: prev.lastUtilization,
-        utilization_after: current,
-        resets_at: data.resets_at,
-      });
-
-      state.set(key, { lastUtilization: current, lastResetsAt: data.resets_at, resetFired: true });
-    } else {
-      state.set(key, {
-        lastUtilization: current,
-        lastResetsAt: data.resets_at,
-        // Re-arm once usage climbs above threshold in the new window
-        resetFired: current >= RESET_THRESHOLD_PCT ? false : prev.resetFired,
-      });
+    if (!prev) {
+      // First poll — just record baseline, never fire on startup
+      state.set(key, { lastResetsAt: data.resets_at });
+      continue;
     }
+
+    const prevMs = new Date(prev.lastResetsAt).getTime();
+    const currMs = new Date(data.resets_at).getTime();
+    const delta = currMs - prevMs;
+
+    // Only signal we trust: resets_at moved forward by at least 1 hour
+    if (delta > RESET_WINDOW_MIN_MS) {
+      console.log(`[${ts()}] RESET DETECTED — ${label}. Sending notification.`);
+
+      await notifier.notify(
+        `*${label} has reset!* Your Claude usage window just refreshed — you're back at full capacity.\n` +
+        `Next reset scheduled for: ${humanDate(data.resets_at)}`,
+        {
+          window: key,
+          utilization_before: usage[key].utilization,
+          utilization_after: data.utilization,
+          resets_at: data.resets_at,
+        }
+      );
+    }
+
+    // Always update — next poll compares against the latest resets_at
+    state.set(key, { lastResetsAt: data.resets_at });
   }
 
   return usage;
