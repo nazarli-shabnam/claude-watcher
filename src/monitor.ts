@@ -1,12 +1,11 @@
 import type { Notifier, UsageResponse, WatcherConfig, WindowKey } from "./types";
 import { fetchUsage } from "./claudeClient";
 
-// Utilization must drop below this threshold to be considered "reset"
 const RESET_THRESHOLD_PCT = 5;
 
 interface WindowState {
   lastUtilization: number;
-  // Prevents firing the same reset notification twice if we poll while still at 0%
+  lastResetsAt: string;   // ISO — when this changes, a new window has definitively started
   resetFired: boolean;
 }
 
@@ -35,19 +34,31 @@ async function checkOnce(
   ];
 
   for (const { key, data, label } of windows) {
-    const prev: WindowState = state.get(key) ?? { lastUtilization: 0, resetFired: false };
+    const prev: WindowState = state.get(key) ?? {
+      lastUtilization: data.utilization,
+      lastResetsAt: data.resets_at,
+      resetFired: false,
+    };
+
     const current = data.utilization;
 
-    const wasAboveThreshold = prev.lastUtilization >= RESET_THRESHOLD_PCT;
-    const isNowBelowThreshold = current < RESET_THRESHOLD_PCT;
-    const shouldFire = wasAboveThreshold && isNowBelowThreshold && !prev.resetFired;
+    // Primary signal: resets_at timestamp changed → Anthropic issued a new window
+    const windowRolled = prev.lastResetsAt !== "" && data.resets_at !== prev.lastResetsAt;
+
+    // Secondary signal: utilization dropped sharply (catches edge cases where timestamp
+    // doesn't change but usage is clearly reset)
+    const utilizationDropped =
+      prev.lastUtilization >= RESET_THRESHOLD_PCT && current < RESET_THRESHOLD_PCT;
+
+    const shouldFire = (windowRolled || utilizationDropped) && !prev.resetFired;
 
     if (shouldFire) {
+      const reason = windowRolled ? "new window issued" : "utilization dropped";
+      console.log(`[${ts()}] RESET DETECTED — ${label} (${reason}). Sending notification.`);
+
       const message =
         `*${label} has reset!* Your Claude usage window just refreshed — you\'re back at full capacity.\n` +
         `Next reset scheduled for: ${humanDate(data.resets_at)}`;
-
-      console.log(`[${ts()}] RESET DETECTED — ${label}. Sending notification.`);
 
       await notifier.notify(message, {
         window: key,
@@ -56,12 +67,13 @@ async function checkOnce(
         resets_at: data.resets_at,
       });
 
-      state.set(key, { lastUtilization: current, resetFired: true });
+      state.set(key, { lastUtilization: current, lastResetsAt: data.resets_at, resetFired: true });
     } else {
       state.set(key, {
         lastUtilization: current,
-        // Once usage climbs again it's a fresh session — arm the trigger for the next reset
-        resetFired: isNowBelowThreshold ? prev.resetFired : false,
+        lastResetsAt: data.resets_at,
+        // Re-arm once usage climbs above threshold in the new window
+        resetFired: current >= RESET_THRESHOLD_PCT ? false : prev.resetFired,
       });
     }
   }
@@ -75,7 +87,6 @@ export async function runMonitor(config: WatcherConfig, notifier: Notifier): Pro
 
   console.log(`[${ts()}] claude-watcher started — polling every ${config.check_interval_minutes} min`);
 
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       const usage = await checkOnce(config, state, notifier);
@@ -85,7 +96,6 @@ export async function runMonitor(config: WatcherConfig, notifier: Notifier): Pro
         `7d: ${usage.seven_day.utilization}% (resets ${humanDate(usage.seven_day.resets_at)})`
       );
     } catch (err) {
-      // Non-fatal: log and keep looping — transient network/auth errors shouldn't kill the process
       console.error(`[${ts()}] ERROR:`, err instanceof Error ? err.message : String(err));
     }
 

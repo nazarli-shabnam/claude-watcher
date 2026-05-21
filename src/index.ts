@@ -10,7 +10,7 @@ import { fetchUsage } from "./claudeClient";
 
 const LOG_PATH = path.join(os.homedir(), ".config", "claude-watcher", "watcher.log");
 
-const COMMANDS = ["init", "start", "status", "help"] as const;
+const COMMANDS = ["init", "start", "status", "stop", "logs", "test-notify", "help"] as const;
 type Command = (typeof COMMANDS)[number];
 
 const [, , rawCommand = "start"] = process.argv;
@@ -72,7 +72,22 @@ async function main(): Promise<void> {
       break;
     }
 
-    case "stop" as Command: {
+    case "test-notify": {
+      const config = loadConfig();
+      const notifier = new SlackNotifier(config.slack_webhook_url);
+      try {
+        await notifier.notify(
+          "Test message from claude-watcher — if you see this, your Slack webhook is working correctly.",
+          { window: "five_hour", utilization_before: 89, utilization_after: 2, resets_at: new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString() }
+        );
+        console.log("Test notification sent. Check your Slack channel.");
+      } catch (err) {
+        die("Failed to send test notification:", err);
+      }
+      break;
+    }
+
+    case "stop": {
       // Locate and kill any background claude-watcher daemon
       try {
         const { execSync } = await import("child_process");
@@ -95,7 +110,7 @@ async function main(): Promise<void> {
       break;
     }
 
-    case "logs" as Command: {
+    case "logs": {
       if (!fs.existsSync(LOG_PATH)) {
         console.error(`No log file found at ${LOG_PATH}. Has the monitor been started yet?`);
         process.exit(1);
@@ -130,6 +145,7 @@ function printHelp(): void {
     stop          Stop the background process
     logs          Tail the log file (Ctrl+C to exit)
     status        One-shot usage snapshot
+    test-notify   Send a test message to your Slack channel
     help          Show this help text
 
   Config file: ${getConfigPath()}
