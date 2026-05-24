@@ -93,12 +93,13 @@ async function main(): Promise<void> {
         const { execSync } = await import("child_process");
         // Works on Windows (wmic) and Unix (pgrep)
         if (process.platform === "win32") {
+          // wmic is deprecated on Windows 11 22H2+ — use Get-CimInstance instead
           const out = execSync(
-            `wmic process where "CommandLine like '%claude-watcher%' and CommandLine like '%--daemon%'" get ProcessId /format:value`,
+            `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*claude-watcher*' -and $_.CommandLine -like '*--daemon*' } | Select-Object -ExpandProperty ProcessId"`,
             { encoding: "utf-8" }
           );
-          const pids = out.match(/ProcessId=(\d+)/g)?.map((m) => m.split("=")[1]);
-          if (!pids?.length) { console.log("claude-watcher is not running."); break; }
+          const pids = out.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
+          if (!pids.length) { console.log("claude-watcher is not running."); break; }
           pids.forEach((pid) => execSync(`taskkill /PID ${pid} /F`));
         } else {
           execSync(`pkill -f "claude-watcher.*--daemon"`);
@@ -124,7 +125,10 @@ async function main(): Promise<void> {
           : ["-f", "-n", "20", LOG_PATH],
         { stdio: "inherit" }
       );
-      await new Promise((_, reject) => tail.on("error", reject));
+      await new Promise<void>((resolve, reject) => {
+        tail.on("error", reject);
+        tail.on("close", resolve);
+      });
       break;
     }
 

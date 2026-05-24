@@ -49,7 +49,9 @@ export async function fetchUsage(config: WatcherConfig): Promise<UsageResponse> 
 
   if (
     typeof data?.five_hour?.utilization !== "number" ||
-    typeof data?.seven_day?.utilization !== "number"
+    typeof data?.seven_day?.utilization !== "number" ||
+    typeof data?.five_hour?.resets_at !== "string" ||
+    typeof data?.seven_day?.resets_at !== "string"
   ) {
     throw new Error(
       "Unexpected response shape from usage endpoint. " +

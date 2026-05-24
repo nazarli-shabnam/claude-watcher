@@ -6,8 +6,14 @@ import { fetchUsage } from "./claudeClient";
 // while still catching every legitimate reset.
 const RESET_WINDOW_MIN_MS = 60 * 60 * 1000;
 
+// Guard against the API occasionally returning epoch (1970-01-01) for resets_at.
+// Storing that value would cause the next valid timestamp to look like a ~56-year jump
+// and fire a bogus notification (or miss a real one). Only accept dates after Jan 2020.
+const MIN_PLAUSIBLE_MS = new Date("2020-01-01T00:00:00Z").getTime();
+
 interface WindowState {
   lastResetsAt: string;
+  lastUtilization: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -39,7 +45,7 @@ async function checkOnce(
 
     if (!prev) {
       // First poll — just record baseline, never fire on startup
-      state.set(key, { lastResetsAt: data.resets_at });
+      state.set(key, { lastResetsAt: data.resets_at, lastUtilization: data.utilization });
       continue;
     }
 
@@ -56,15 +62,20 @@ async function checkOnce(
         `Next reset scheduled for: ${humanDate(data.resets_at)}`,
         {
           window: key,
-          utilization_before: usage[key].utilization,
+          utilization_before: prev.lastUtilization,
           utilization_after: data.utilization,
           resets_at: data.resets_at,
         }
       );
     }
 
-    // Always update — next poll compares against the latest resets_at
-    state.set(key, { lastResetsAt: data.resets_at });
+    // Only persist a plausible timestamp — discard epoch/bogus values so they can't
+    // poison the baseline and trigger a false positive (or hide a real one) next poll.
+    if (currMs >= MIN_PLAUSIBLE_MS) {
+      state.set(key, { lastResetsAt: data.resets_at, lastUtilization: data.utilization });
+    } else {
+      console.warn(`[${ts()}] Ignoring suspicious resets_at value (${data.resets_at}) for ${label} — keeping previous baseline.`);
+    }
   }
 
   return usage;
