@@ -93,9 +93,11 @@ async function main(): Promise<void> {
         const { execSync } = await import("child_process");
         // Works on Windows (wmic) and Unix (pgrep)
         if (process.platform === "win32") {
-          // wmic is deprecated on Windows 11 22H2+ — use Get-CimInstance instead
+          // wmic is deprecated on Windows 11 22H2+ — use Get-CimInstance instead.
+          // Filter by Name=node.exe to avoid the query's own PowerShell process
+          // self-matching (its command line contains the search strings as literals).
           const out = execSync(
-            `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*claude-watcher*' -and $_.CommandLine -like '*--daemon*' } | Select-Object -ExpandProperty ProcessId"`,
+            `powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*claude-watcher*' -and $_.CommandLine -like '*--daemon*' } | Select-Object -ExpandProperty ProcessId"`,
             { encoding: "utf-8" }
           );
           const pids = out.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
